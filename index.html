@@ -1123,7 +1123,7 @@ function setupReviewForm(){
 /* Apps Script GET responses don't include Access-Control-Allow-Origin, so fetch() can't
    read them cross-origin. Loading via a script element (JSONP) sidesteps that entirely. */
 let __jsonpN = 0;
-function jsonpGet(url){
+function jsonpGet(url, timeoutMs){
   return new Promise((resolve, reject) => {
     const cb = '__jsonp_' + (__jsonpN++);
     const s = document.createElement('script');
@@ -1132,7 +1132,7 @@ function jsonpGet(url){
     s.onerror = () => { done(); reject(new Error('jsonp failed')); };
     s.src = url + (url.includes('?') ? '&' : '?') + 'callback=' + cb;
     document.body.appendChild(s);
-    setTimeout(() => { if (window[cb]) { done(); reject(new Error('jsonp timeout')); } }, 10000);
+    setTimeout(() => { if (window[cb]) { done(); reject(new Error('jsonp timeout')); } }, timeoutMs || 12000);
   });
 }
 function fetchRemoteReviews(){
@@ -1145,32 +1145,39 @@ function fetchRemoteReviews(){
 }
 
 /* ============ LIVE CATALOG (Google Sheet + Drive images) ============ */
+const CATALOG_CACHE_KEY = 'noorCatalogV1';
+function applyCatalog(list){
+  const seen = new Set();
+  PRODUCTS = list.map((p,i)=>({
+    id: String(p.id || ('sheet_'+(i+1))),
+    cat: p.category || 'Others',
+    name: p.name || 'প্রোডাক্ট',
+    note: p.details || '',
+    price: Number(p.price)||0,
+    image: p.image || '',
+  })).filter(p=>p.price>0 && !seen.has(p.id) && seen.add(p.id));   // rows without a valid price are not sellable
+  catalogState='ready';
+  CATS = buildCatsFromProducts(PRODUCTS);
+  assignCatColors(CATS);
+  // drop cart lines for products that were removed from the sheet
+  Object.keys(cart).forEach(id=>{ if(!PRODUCTS.find(p=>p.id===id)) delete cart[id]; });
+  saveCart();
+  if(!CATS.find(c=>c.key===activeCat)) activeCat='all';
+  renderChips(); renderGrid(); updateBadge(); refreshProductDropdown();
+}
+// Slow phone networks + Google's script start-up can take a while, so: 30s wait, up to 3 automatic retries,
+// and the last good product list is kept on the device so the shop opens instantly next time.
 function loadCatalog(attempt){
   attempt = attempt||0;
-  if(!SHEET_WEBHOOK_URL || SHEET_WEBHOOK_URL.startsWith('PASTE_')){ catalogState='error'; renderGrid(); return; }
-  jsonpGet(SHEET_WEBHOOK_URL + '?action=products')
+  if(!SHEET_WEBHOOK_URL || SHEET_WEBHOOK_URL.startsWith('PASTE_')){ catalogState='error'; renderGrid(); return Promise.resolve(); }
+  return jsonpGet(SHEET_WEBHOOK_URL + '?action=products', 30000)
     .then(list=>{
       if(!Array.isArray(list)) throw new Error('bad catalog');
-      const seen = new Set();
-      PRODUCTS = list.map((p,i)=>({
-        id: String(p.id || ('sheet_'+(i+1))),
-        cat: p.category || 'Others',
-        name: p.name || 'প্রোডাক্ট',
-        note: p.details || '',
-        price: Number(p.price)||0,
-        image: p.image || '',
-      })).filter(p=>p.price>0 && !seen.has(p.id) && seen.add(p.id));   // rows without a valid price are not sellable
-      catalogState='ready';
-      CATS = buildCatsFromProducts(PRODUCTS);
-      assignCatColors(CATS);
-      // drop cart lines for products that were removed from the sheet
-      Object.keys(cart).forEach(id=>{ if(!PRODUCTS.find(p=>p.id===id)) delete cart[id]; });
-      saveCart();
-      if(!CATS.find(c=>c.key===activeCat)) activeCat='all';
-      renderChips(); renderGrid(); updateBadge(); refreshProductDropdown();
+      applyCatalog(list);
+      store.set(CATALOG_CACHE_KEY, JSON.stringify(list));
     })
     .catch(()=>{
-      if(attempt<1){ setTimeout(()=>loadCatalog(1), 1500); return; }   // one quick automatic retry
+      if(attempt<3) return new Promise(r=>setTimeout(r, 2000*(attempt+1))).then(()=>loadCatalog(attempt+1));
       if(!PRODUCTS.length){ catalogState='error'; renderGrid(); }       // keep showing old data if we already have it
     });
 }
@@ -1207,9 +1214,11 @@ function loadBanners(){
 }
 
 renderChips(); renderGrid(); updateBadge();
-renderReviews(); setupReviewForm(); fetchRemoteReviews();
-loadCatalog(); loadBanners();
-setInterval(()=>{ loadCatalog(1); loadBanners(); }, CATALOG_REFRESH_MS);
+renderReviews(); setupReviewForm();
+try{ const cached = JSON.parse(store.get(CATALOG_CACHE_KEY) || 'null'); if(Array.isArray(cached) && cached.length) applyCatalog(cached); }catch(e){}
+// products first; reviews and banner after, so they don't compete for a slow connection
+loadCatalog().then(()=>{ fetchRemoteReviews(); loadBanners(); });
+setInterval(()=>{ loadCatalog(2); loadBanners(); }, CATALOG_REFRESH_MS);
 </script>
 </body>
 </html>
