@@ -989,11 +989,7 @@ function submitOrder(order){
 
   // Fire-and-forget to Google Sheets via Apps Script (text/plain avoids CORS preflight issues)
   if(SHEET_WEBHOOK_URL && !SHEET_WEBHOOK_URL.startsWith('PASTE_')){
-    fetch(SHEET_WEBHOOK_URL, {
-      method:'POST', mode:'no-cors',
-      headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body: JSON.stringify(payload)
-    }).catch(()=>{ window.__saveFailed=true; const w=document.getElementById('omWarn'); if(w) w.style.display='block'; const b=document.getElementById('omWa'); if(b) b.classList.add('primary'); });
+    apiPost(payload).catch(()=>{ window.__saveFailed=true; const w=document.getElementById('omWarn'); if(w) w.style.display='block'; const b=document.getElementById('omWa'); if(b) b.classList.add('primary'); });
   }
   window.__saveFailed=false;
 
@@ -1108,11 +1104,7 @@ function setupReviewForm(){
     // Reviews are NOT shown immediately — they go to the sheet as "Pending" and
     // only appear here once you mark them Approved, so the page can't be spammed by strangers.
     if(SHEET_WEBHOOK_URL && !SHEET_WEBHOOK_URL.startsWith('PASTE_')){
-      fetch(SHEET_WEBHOOK_URL, {
-        method:'POST', mode:'no-cors',
-        headers:{'Content-Type':'text/plain;charset=utf-8'},
-        body: JSON.stringify({kind:'review', ...review})
-      }).catch(()=>{});
+      apiPost({kind:'review', ...review}).catch(()=>{});
     }
     store.set('noorLastReview', String(Date.now()));
     const ok=document.getElementById('rsuccess'); ok.style.display='block';
@@ -1135,9 +1127,29 @@ function jsonpGet(url, timeoutMs){
     setTimeout(() => { if (window[cb]) { done(); reject(new Error('jsonp timeout')); } }, timeoutMs || 12000);
   });
 }
+/* Talk to Google through our own site first (/.netlify/functions/gas); if that is unavailable, talk to Google directly. */
+const PROXY_URL = '/.netlify/functions/gas';
+async function apiGet(action, timeoutMs){
+  timeoutMs = timeoutMs || 15000;
+  try{
+    const ctl = new AbortController(); const t = setTimeout(()=>ctl.abort(), timeoutMs);
+    const r = await fetch(PROXY_URL + '?action=' + action, { signal: ctl.signal });
+    clearTimeout(t);
+    if(r.ok){ const d = await r.json(); if(Array.isArray(d)) return d; }
+  }catch(e){ /* fall through to direct */ }
+  return jsonpGet(SHEET_WEBHOOK_URL + '?action=' + action, timeoutMs);
+}
+async function apiPost(payload){
+  const body = JSON.stringify(payload);
+  try{
+    const r = await fetch(PROXY_URL, { method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body });
+    if(r.ok){ const d = await r.json().catch(()=>({})); if(d.result !== 'error') return d; }
+  }catch(e){ /* fall through to direct */ }
+  await fetch(SHEET_WEBHOOK_URL, { method:'POST', mode:'no-cors', headers:{'Content-Type':'text/plain;charset=utf-8'}, body });
+}
 function fetchRemoteReviews(){
   if(!SHEET_WEBHOOK_URL || SHEET_WEBHOOK_URL.startsWith('PASTE_')) return;
-  jsonpGet(SHEET_WEBHOOK_URL + '?action=reviews')
+  apiGet('reviews')
     .then(list=>{
       if(Array.isArray(list)){ reviews = list; reviewsShown = REVIEWS_PAGE_SIZE; renderReviews(); }
     })
@@ -1170,7 +1182,7 @@ function applyCatalog(list){
 function loadCatalog(attempt){
   attempt = attempt||0;
   if(!SHEET_WEBHOOK_URL || SHEET_WEBHOOK_URL.startsWith('PASTE_')){ catalogState='error'; renderGrid(); return Promise.resolve(); }
-  return jsonpGet(SHEET_WEBHOOK_URL + '?action=products', 30000)
+  return apiGet('products', 30000)
     .then(list=>{
       if(!Array.isArray(list)) throw new Error('bad catalog');
       applyCatalog(list);
@@ -1201,7 +1213,7 @@ function buildBanner(urls){
 }
 function loadBanners(){
   if(!SHEET_WEBHOOK_URL || SHEET_WEBHOOK_URL.startsWith('PASTE_')) return;
-  jsonpGet(SHEET_WEBHOOK_URL + '?action=banners').then(list=>{
+  apiGet('banners').then(list=>{
     if(!Array.isArray(list)) return;
     const urls = list.map(b=>b && b.image).filter(Boolean);
     if(!urls.length) return;                        // no banners in the Drive folder: keep the built-in banner
